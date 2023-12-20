@@ -91,6 +91,57 @@ def compute_metric(dataloader: DataLoader, tps: ConvNet_TPS, criterion_l1: nn.L1
     vgg_loss = vgg_running_loss / (step + 1)
     return loss, vgg_loss, visual
 
+def training_loop_tps(dataloader: DataLoader, tps: ConvNet_TPS, optimizer_tps: torch.optim.Optimizer,
+                      criterion_l1: nn.L1Loss, scaler: torch.cuda.amp.GradScaler, const_weight: float) -> tuple[
+    float, float, float, list[list]]:
+    """
+    Training loop for the TPS network. Note that the TPS is trained on a low resolution image for sake of performance.
+    """
+    tps.train()
+    running_loss = 0.
+    running_l1_loss = 0.
+    running_const_loss = 0.
+    for step, inputs in enumerate(tqdm(dataloader)):  # Yield images with low resolution (256x192)
+        low_cloth = inputs['cloth'].to(device, non_blocking=True)
+        low_image = inputs['image'].to(device, non_blocking=True)
+        low_im_cloth = inputs['im_cloth'].to(device, non_blocking=True)
+        low_im_mask = inputs['im_mask'].to(device, non_blocking=True)
+
+        low_pose_map = inputs.get('dense_uv')
+        if low_pose_map is None:  # If the dataset does not provide dense UV maps, use the pose map (keypoints) instead
+            low_pose_map = inputs['pose_map']
+        low_pose_map = low_pose_map.to(device, non_blocking=True)
+
+        with torch.cuda.amp.autocast():
+            # TPS parameters prediction
+            agnostic = torch.cat([low_im_mask, low_pose_map], 1)
+            low_grid, theta, rx, ry, cx, cy, rg, cg = tps(low_cloth, agnostic)
+
+            # Warp the cloth using the predicted TPS parameters
+            low_warped_cloth = F.grid_sample(low_cloth, low_grid, padding_mode='border')
+
+            # Compute the loss
+            l1_loss = criterion_l1(low_warped_cloth, low_im_cloth)
+            const_loss = torch.mean(rx + ry + cx + cy + rg + cg)
+
+            loss = l1_loss + const_loss * const_weight
+
+        # Update the parameters
+        optimizer_tps.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer_tps)
+        scaler.update()
+
+        running_loss += loss.item()
+        running_l1_loss += l1_loss.item()
+        running_const_loss += const_loss.item()
+
+    visual = [[low_image, low_cloth, low_im_cloth, low_warped_cloth.clamp(-1, 1)]]
+    loss = running_loss / (step + 1)
+    l1_loss = running_l1_loss / (step + 1)
+    const_loss = running_const_loss / (step + 1)
+    return loss, l1_loss, const_loss, visual
+
 
 def training_loop_refinement(dataloader: DataLoader, tps: ConvNet_TPS, refinement: UNetVanilla,
                              optimizer_ref: torch.optim.Optimizer, criterion_l1: nn.L1Loss, criterion_vgg: VGGLoss,
