@@ -1,4 +1,4 @@
-# File heavily based on https://github.com/aimagelab/dress-code/blob/main/data/dataset.py
+# File heavily based on https://github.com/sangyun884/HR-VITON/blob/main/cp_dataset.py
 
 import json
 import os
